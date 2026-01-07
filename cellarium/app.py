@@ -444,71 +444,82 @@ def create_header(data_manager: DataManager):
 
 def create_sidebar(data_manager: DataManager, pages_data: Optional[Dict] = None):
     """Create the sidebar content."""
-    # Build initial page list from saved pages
+    # Build initial page list from saved pages (hierarchical)
     if pages_data:
-        page_items = [
-            create_page_item(
-                pid,
-                pages_data["pages"][pid]["name"],
-                pages_data["pages"][pid]["n_cells"],
-                pid == pages_data.get("active_page", "root"),
-                pages_data["pages"][pid].get("parent_id") is None,
-            )
-            for pid in pages_data.get("page_order", ["root"])
-        ]
+        page_items = build_page_tree(pages_data, pages_data.get("active_page", "root"))
     else:
         page_items = [
-            create_page_item("root", "All Cells", data_manager.n_cells, True, True),
+            create_page_item("root", "All Cells", data_manager.n_cells, True, True, depth=0),
         ]
 
     return dmc.Stack([
-        # Pages section
-        dmc.Group([
-            dmc.Text("Pages", fw=600, size="sm"),
-            dmc.ActionIcon(
-                DashIconify(icon="tabler:plus", width=16),
-                id="add-page-btn", variant="light", size="sm",
-            ),
-        ], justify="space-between"),
-
-        dmc.ScrollArea(
-            h=180,
-            children=html.Div(id="page-list", children=page_items),
-        ),
-
-        dmc.Divider(),
-
-        # Quick controls
-        dmc.Text("Quick Color", fw=600, size="sm"),
-        dmc.Select(
-            id="global-color-select",
-            data=[{"value": col, "label": col} for col in data_manager.obs_columns],
-            placeholder="Color all plots by...",
-            searchable=True, clearable=True,
-        ),
-
-        dmc.Divider(),
-
-        # Dataset info
-        dmc.Text("Dataset", fw=600, size="sm"),
+        # Pages section - takes most of the space
         dmc.Stack([
-            dmc.Text(f"📁 {data_manager.config.data_path.name}", size="xs", c="dimmed"),
-            dmc.Text(f"🧬 {data_manager.n_genes:,} genes", size="xs", c="dimmed"),
-            dmc.Text(f"📊 {len(data_manager.available_embeddings)} embeddings", size="xs", c="dimmed"),
-        ], gap=4),
-    ], gap="md")
+            dmc.Group([
+                dmc.Text("Pages", fw=600, size="sm"),
+                dmc.ActionIcon(
+                    DashIconify(icon="tabler:plus", width=16),
+                    id="add-page-btn", variant="light", size="sm",
+                ),
+            ], justify="space-between"),
+
+            dmc.ScrollArea(
+                style={"flex": 1},
+                children=html.Div(id="page-list", children=page_items),
+            ),
+        ], gap="xs", style={"flex": 1, "minHeight": 0}),
+
+        dmc.Divider(),
+
+        # Quick controls (compact)
+        dmc.Stack([
+            dmc.Text("Quick Color", fw=600, size="sm"),
+            dmc.Select(
+                id="global-color-select",
+                data=[{"value": col, "label": col} for col in data_manager.obs_columns],
+                placeholder="Color all plots by...",
+                searchable=True, clearable=True,
+                size="xs",
+            ),
+        ], gap="xs"),
+
+        dmc.Divider(),
+
+        # Dataset info (compact)
+        dmc.Stack([
+            dmc.Text("Dataset", fw=600, size="sm"),
+            dmc.Text(f"📁 {data_manager.config.data_path.name}", size="xs", c="dimmed", truncate=True),
+            dmc.Group([
+                dmc.Text(f"🧬 {data_manager.n_genes:,}", size="xs", c="dimmed"),
+                dmc.Text(f"📊 {len(data_manager.available_embeddings)} emb", size="xs", c="dimmed"),
+            ], gap="xs"),
+        ], gap=2),
+    ], gap="md", style={"height": "100%"})
 
 
-def create_page_item(page_id: str, name: str, n_cells: int, is_active: bool, is_root: bool):
-    """Create a page item for the sidebar."""
+def create_page_item(page_id: str, name: str, n_cells: int, is_active: bool, is_root: bool, depth: int = 0):
+    """Create a page item for the sidebar with hierarchy indentation."""
+    # Choose icon based on depth
+    if is_root:
+        icon = "tabler:database"
+    elif depth == 1:
+        icon = "tabler:folder"
+    else:
+        icon = "tabler:file"
+
     # Use html.Div as the clickable wrapper since dmc.Paper doesn't track n_clicks properly
     return html.Div(
         dmc.Paper(
             dmc.Group([
                 dmc.Stack([
                     dmc.Group([
+                        # Tree connector for nested items
+                        html.Span(
+                            "└─ " if depth > 0 else "",
+                            style={"color": "var(--mantine-color-dimmed)", "fontFamily": "monospace", "fontSize": "12px"}
+                        ) if depth > 0 else None,
                         DashIconify(
-                            icon="tabler:file" if is_root else "tabler:file-arrow-right",
+                            icon=icon,
                             width=14,
                             color="var(--mantine-color-blue-6)" if is_active else "var(--mantine-color-dimmed)",
                         ),
@@ -517,7 +528,7 @@ def create_page_item(page_id: str, name: str, n_cells: int, is_active: bool, is_
                             id={"type": "page-name-text", "index": page_id},
                         ),
                     ], gap="xs"),
-                    dmc.Text(f"{n_cells:,} cells", size="xs", c="dimmed", pl="xl"),
+                    dmc.Text(f"{n_cells:,} cells", size="xs", c="dimmed", pl=f"{24 + depth * 16}px"),
                 ], gap=2),
                 dmc.Group([
                     dmc.ActionIcon(
@@ -537,12 +548,65 @@ def create_page_item(page_id: str, name: str, n_cells: int, is_active: bool, is_
             p="xs", withBorder=True,
             style={
                 "backgroundColor": "var(--mantine-color-blue-light)" if is_active else None,
+                "marginLeft": f"{depth * 12}px",
             },
         ),
         id={"type": "page-item", "index": page_id},
         n_clicks=0,
         style={"cursor": "pointer"},
     )
+
+
+def build_page_tree(pages_state: Dict, active_page_id: str) -> List:
+    """Build a hierarchical page list showing parent-child relationships."""
+    pages = pages_state.get("pages", {})
+    page_order = pages_state.get("page_order", ["root"])
+
+    # Build parent-to-children mapping
+    children_map = {}  # parent_id -> [child_ids]
+    for pid in page_order:
+        if pid not in pages:
+            continue
+        parent_id = pages[pid].get("parent_id")
+        if parent_id is None:
+            parent_id = "__root__"  # Use sentinel for top-level
+        if parent_id not in children_map:
+            children_map[parent_id] = []
+        children_map[parent_id].append(pid)
+
+    # Recursively build tree
+    def build_subtree(parent_id: str, depth: int) -> List:
+        items = []
+        children = children_map.get(parent_id, [])
+        for pid in children:
+            page = pages.get(pid, {})
+            is_root = pid == "root"
+            is_active = pid == active_page_id
+            items.append(
+                create_page_item(
+                    pid, page.get("name", pid), page.get("n_cells", 0),
+                    is_active, is_root, depth
+                )
+            )
+            # Add children recursively
+            items.extend(build_subtree(pid, depth + 1))
+        return items
+
+    # Start from root level (pages with no parent or parent_id is None)
+    result = []
+    # First add root page
+    if "root" in pages:
+        root_page = pages["root"]
+        result.append(
+            create_page_item(
+                "root", root_page.get("name", "All Cells"), root_page.get("n_cells", 0),
+                active_page_id == "root", True, 0
+            )
+        )
+        # Add children of root
+        result.extend(build_subtree("root", 1))
+
+    return result
 
 
 def create_main_content(data_manager: DataManager, panels: Dict, grid_layout: Dict):
@@ -2603,15 +2667,14 @@ def register_callbacks(app: Dash):
         updated_pages = dict(pages_state)
         updated_pages["pages"][page_id] = new_page
         updated_pages["active_page"] = page_id
+        # BUGFIX: Add to page_order so it persists across callbacks
+        if "page_order" not in updated_pages:
+            updated_pages["page_order"] = ["root"]
+        if page_id not in updated_pages["page_order"]:
+            updated_pages["page_order"].append(page_id)
 
-        # Generate page list
-        page_list_children = []
-        for pid, page in updated_pages["pages"].items():
-            is_active = pid == page_id
-            is_root = pid == "root"
-            page_list_children.append(
-                create_page_item(pid, page["name"], page["n_cells"], is_active, is_root)
-            )
+        # Generate hierarchical page list
+        page_list_children = build_page_tree(updated_pages, page_id)
 
         # Render dashboard for new page
         grid = create_dashboard_grid(new_page["panels"], new_page["grid_layout"])
@@ -2707,17 +2770,8 @@ def register_callbacks(app: Dash):
         except Exception as e:
             print(f"Warning: Could not save layout to database: {e}")
 
-        # Rebuild page list
-        page_list = [
-            create_page_item(
-                pid,
-                pages_state["pages"][pid]["name"],
-                pages_state["pages"][pid]["n_cells"],
-                pid == page_id,
-                pages_state["pages"][pid].get("parent_id") is None,
-            )
-            for pid in pages_state["page_order"]
-        ]
+        # Rebuild hierarchical page list
+        page_list = build_page_tree(pages_state, page_id)
 
         grid = create_dashboard_grid(new_page["panels"], new_page["grid_layout"])
         notification = create_notification(
@@ -2752,16 +2806,8 @@ def register_callbacks(app: Dash):
         pages_state["active_page"] = new_active
         active_page = pages_state["pages"][new_active]
 
-        page_list = [
-            create_page_item(
-                pid,
-                pages_state["pages"][pid]["name"],
-                pages_state["pages"][pid]["n_cells"],
-                pid == new_active,
-                pages_state["pages"][pid].get("parent_id") is None,
-            )
-            for pid in pages_state["page_order"]
-        ]
+        # Rebuild hierarchical page list
+        page_list = build_page_tree(pages_state, new_active)
 
         grid = create_dashboard_grid(active_page["panels"], active_page["grid_layout"])
         return pages_state, page_list, grid
@@ -2809,16 +2855,8 @@ def register_callbacks(app: Dash):
 
         active_page = pages_state["pages"][pages_state["active_page"]]
 
-        page_list = [
-            create_page_item(
-                pid,
-                pages_state["pages"][pid]["name"],
-                pages_state["pages"][pid]["n_cells"],
-                pid == pages_state["active_page"],
-                pages_state["pages"][pid].get("parent_id") is None,
-            )
-            for pid in pages_state["page_order"]
-        ]
+        # Rebuild hierarchical page list
+        page_list = build_page_tree(pages_state, pages_state["active_page"])
 
         grid = create_dashboard_grid(active_page["panels"], active_page["grid_layout"])
         notification = create_notification(
@@ -2886,16 +2924,8 @@ def register_callbacks(app: Dash):
 
         pages_state["pages"][page_id]["name"] = new_name
 
-        page_list = [
-            create_page_item(
-                pid,
-                pages_state["pages"][pid]["name"],
-                pages_state["pages"][pid]["n_cells"],
-                pid == pages_state.get("active_page"),
-                pages_state["pages"][pid].get("parent_id") is None,
-            )
-            for pid in pages_state["page_order"]
-        ]
+        # Rebuild hierarchical page list
+        page_list = build_page_tree(pages_state, pages_state.get("active_page", "root"))
 
         return pages_state, page_list
 
@@ -2986,16 +3016,8 @@ def register_callbacks(app: Dash):
             for page_id, page_data in pages_state["pages"].items():
                 persist_page_layout(layout_repo, page_id, page_data)
 
-            page_list = [
-                create_page_item(
-                    pid,
-                    pages_state["pages"][pid]["name"],
-                    pages_state["pages"][pid].get("n_cells", 0),
-                    pid == pages_state["active_page"],
-                    pages_state["pages"][pid].get("parent_id") is None,
-                )
-                for pid in pages_state["page_order"]
-            ]
+            # Rebuild hierarchical page list
+            page_list = build_page_tree(pages_state, pages_state["active_page"])
 
             grid = create_dashboard_grid(active_page.get("panels", {}), active_page.get("grid_layout", {}))
             return pages_state, page_list, grid, False
@@ -3042,11 +3064,8 @@ def register_callbacks(app: Dash):
         layout_repo: LayoutRepository = app.server.config["layout_repo"]
         persist_page_layout(layout_repo, active_page_id, active_page)
 
-        page_list = [
-            create_page_item(pid, pages_state["pages"][pid]["name"], pages_state["pages"][pid]["n_cells"],
-                           pid == active_page_id, pages_state["pages"][pid].get("parent_id") is None)
-            for pid in pages_state["page_order"]
-        ]
+        # Rebuild hierarchical page list
+        page_list = build_page_tree(pages_state, active_page_id)
         grid = create_dashboard_grid(active_page["panels"], active_page["grid_layout"])
         return pages_state, page_list, grid
 
@@ -3279,13 +3298,30 @@ def register_callbacks(app: Dash):
             active_page_id = pages_state.get("active_page", "root")
             active_page = pages_state["pages"].get(active_page_id, {})
             n_subset = active_page.get("n_cells", 0)
-            n_total = pages_state["pages"]["root"]["n_cells"]
-            n_rest = n_total - n_subset
 
-            info_text = (
-                f"Comparing {n_subset:,} cells in '{active_page.get('name', 'Subset')}' "
-                f"vs {n_rest:,} other cells using rank_genes_groups."
-            )
+            # Determine reference group based on parent
+            parent_id = active_page.get("parent_id", "root")
+            parent_page = pages_state["pages"].get(parent_id, {})
+            parent_indices = parent_page.get("cell_indices")
+
+            if parent_indices is not None:
+                # Sub-subset: compare against parent subset
+                n_parent = len(parent_indices)
+                n_rest = n_parent - n_subset
+                parent_name = parent_page.get("name", parent_id)
+                info_text = (
+                    f"Comparing {n_subset:,} cells in '{active_page.get('name', 'Subset')}' "
+                    f"vs {n_rest:,} other cells from parent '{parent_name}'."
+                )
+            else:
+                # Direct child of root: compare against all other cells
+                n_total = pages_state["pages"]["root"]["n_cells"]
+                n_rest = n_total - n_subset
+                info_text = (
+                    f"Comparing {n_subset:,} cells in '{active_page.get('name', 'Subset')}' "
+                    f"vs {n_rest:,} other cells (all remaining cells)."
+                )
+
             return True, info_text
 
         raise PreventUpdate
@@ -3355,31 +3391,59 @@ def register_callbacks(app: Dash):
             )
 
         n_subset = len(subset_indices)
-        n_total = dm.n_cells
-        n_rest = n_total - n_subset
+        subset_set = set(subset_indices)
 
-        print(f"  📈 Cells: {n_subset:,} subset vs {n_rest:,} rest (total: {n_total:,})")
+        # Get parent page to determine reference cells
+        parent_id = active_page.get("parent_id", "root")
+        parent_page = pages_state["pages"].get(parent_id, {})
+        parent_indices = parent_page.get("cell_indices")
+
+        # Determine reference cells: parent's cells minus current subset
+        if parent_indices is not None:
+            # Sub-subset: compare against parent subset (not all cells)
+            parent_set = set(parent_indices)
+            rest_indices = list(parent_set - subset_set)
+            reference_name = parent_page.get("name", parent_id)
+            print(f"  🔗 Parent page: '{reference_name}' ({len(parent_indices):,} cells)")
+        else:
+            # Direct child of root: compare against all other cells
+            rest_indices = [i for i in range(dm.n_cells) if i not in subset_set]
+            reference_name = "all other cells"
+            print(f"  🔗 Parent: root (comparing against all other cells)")
+
+        n_rest = len(rest_indices)
+
+        print(f"  📈 Cells: {n_subset:,} subset vs {n_rest:,} rest")
 
         if n_rest <= 0:
             return (
-                dmc.Alert(f"Cannot run DEG: subset has {n_subset} cells but total is only {n_total}.", color="red"),
+                dmc.Alert(
+                    f"Cannot run DEG: no cells in reference group. "
+                    f"Subset has {n_subset} cells, parent has {len(parent_indices) if parent_indices else dm.n_cells}.",
+                    color="red"
+                ),
                 None, False, True, True
             )
 
         try:
-            # Create a copy of AnnData for analysis
-            print(f"  📦 Copying AnnData ({dm.n_cells:,} cells, {dm.n_genes:,} genes)...")
-            adata = dm.adata.copy()
+            # Subset AnnData to only include relevant cells (subset + rest from parent)
+            all_relevant_indices = sorted(subset_set | set(rest_indices))
+            print(f"  📦 Subsetting AnnData to {len(all_relevant_indices):,} relevant cells...")
+            adata = dm.adata[all_relevant_indices, :].copy()
 
-            # Add a group column: "subset" for current cells, "rest" for others
-            # Use numpy boolean mask for reliable indexing
+            # Create index mapping for the subsetted AnnData
+            index_to_position = {idx: pos for pos, idx in enumerate(all_relevant_indices)}
+
+            # Add a group column: "subset" for current cells, "rest" for parent's other cells
             print(f"  🏷️  Creating cell groups (subset: {n_subset:,}, rest: {n_rest:,})...")
-            subset_mask = np.zeros(adata.n_obs, dtype=bool)
-            for idx in subset_indices:
-                if 0 <= idx < adata.n_obs:
-                    subset_mask[idx] = True
+            groups = []
+            for idx in all_relevant_indices:
+                if idx in subset_set:
+                    groups.append("subset")
+                else:
+                    groups.append("rest")
 
-            adata.obs["_deg_group"] = np.where(subset_mask, "subset", "rest")
+            adata.obs["_deg_group"] = groups
             adata.obs["_deg_group"] = adata.obs["_deg_group"].astype("category")
 
             # Verify we have cells in both groups
