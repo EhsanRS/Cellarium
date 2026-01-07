@@ -825,9 +825,11 @@ def create_config_drawer(data_manager: DataManager):
         ]),
         position="right",
         size="md",
+        withOverlay=False,
+        closeOnClickOutside=False,
         children=[
             dmc.ScrollArea(
-                h="calc(100vh - 100px)",
+                h="calc(100vh - 160px)",
                 children=[
                     dmc.Stack([
                         # Scatter config section
@@ -1117,14 +1119,25 @@ def create_config_drawer(data_manager: DataManager):
                             ),
                         ]),
 
-                        dmc.Button(
-                            "Apply", id="config-apply-btn",
-                            leftSection=DashIconify(icon="tabler:check", width=16),
-                            fullWidth=True, mt="xl",
-                        ),
                     ], gap="sm", p="md"),
                 ],
             ),
+            # Sticky footer with Apply button
+            html.Div(
+                dmc.Button(
+                    "Apply", id="config-apply-btn",
+                    leftSection=DashIconify(icon="tabler:check", width=16),
+                    fullWidth=True,
+                ),
+                style={
+                    "position": "sticky",
+                    "bottom": "0",
+                    "padding": "16px",
+                    "borderTop": "1px solid var(--mantine-color-default-border)",
+                    "backgroundColor": "var(--mantine-color-body)",
+                },
+            ),
+
         ],
         opened=False,
     )
