@@ -3302,42 +3302,104 @@ def register_callbacks(app: Dash):
         State("deg-method", "value"),
         State("deg-use-raw", "checked"),
         prevent_initial_call=True,
+        running=[
+            (Output("deg-loading", "visible"), True, False),
+            (Output("deg-run-btn", "disabled"), True, False),
+            (Output("deg-run-btn", "children"), "Running...", "Run Analysis"),
+        ],
     )
     def run_deg_analysis(n_clicks, pages_state, n_genes, method, use_raw):
         """Run differential expression analysis using rank_genes_groups."""
+        import time
+        start_time = time.time()
+
         if not n_clicks:
             raise PreventUpdate
+
+        print("\n" + "=" * 60)
+        print("🧬 DEG ANALYSIS STARTED")
+        print("=" * 60)
 
         import scanpy as sc
 
         dm: DataManager = app.server.config["data_manager"]
         active_page_id = pages_state.get("active_page", "root")
         active_page = pages_state["pages"].get(active_page_id, {})
-        subset_indices = active_page.get("cell_indices", [])
+        subset_indices = active_page.get("cell_indices")
 
-        if not subset_indices:
+        print(f"  📊 Page: {active_page.get('name', active_page_id)}")
+        print(f"  🔬 Method: {method or 'wilcoxon'}, Top genes: {n_genes or 50}, Use raw: {use_raw}")
+
+        # Debug: check what we got
+        if subset_indices is None:
+            print(f"  ❌ ERROR: No cell_indices found for page")
+            print("=" * 60 + "\n")
             return (
-                dmc.Alert("No cell indices found for this subset.", color="red"),
+                dmc.Alert(
+                    f"No cell_indices found for page '{active_page.get('name', active_page_id)}'. "
+                    f"This page may not be a proper subset.",
+                    color="red", title="Error"
+                ),
+                None, False, True, True
+            )
+
+        if not isinstance(subset_indices, (list, tuple)) or len(subset_indices) == 0:
+            print(f"  ❌ ERROR: cell_indices is empty or invalid")
+            print("=" * 60 + "\n")
+            return (
+                dmc.Alert(
+                    f"cell_indices is empty or invalid (type: {type(subset_indices).__name__}, len: {len(subset_indices) if hasattr(subset_indices, '__len__') else 'N/A'})",
+                    color="red", title="Error"
+                ),
+                None, False, True, True
+            )
+
+        n_subset = len(subset_indices)
+        n_total = dm.n_cells
+        n_rest = n_total - n_subset
+
+        print(f"  📈 Cells: {n_subset:,} subset vs {n_rest:,} rest (total: {n_total:,})")
+
+        if n_rest <= 0:
+            return (
+                dmc.Alert(f"Cannot run DEG: subset has {n_subset} cells but total is only {n_total}.", color="red"),
                 None, False, True, True
             )
 
         try:
             # Create a copy of AnnData for analysis
+            print(f"  📦 Copying AnnData ({dm.n_cells:,} cells, {dm.n_genes:,} genes)...")
             adata = dm.adata.copy()
 
             # Add a group column: "subset" for current cells, "rest" for others
-            adata.obs["_deg_group"] = "rest"
-            adata.obs.iloc[subset_indices, adata.obs.columns.get_loc("_deg_group")] = "subset"
+            # Use numpy boolean mask for reliable indexing
+            print(f"  🏷️  Creating cell groups (subset: {n_subset:,}, rest: {n_rest:,})...")
+            subset_mask = np.zeros(adata.n_obs, dtype=bool)
+            for idx in subset_indices:
+                if 0 <= idx < adata.n_obs:
+                    subset_mask[idx] = True
 
-            # Use raw data if requested and available
-            if use_raw and adata.raw is not None:
-                # rank_genes_groups will use raw automatically if set
-                pass
-            elif use_raw and adata.raw is None:
-                # No raw, continue with main matrix
-                pass
+            adata.obs["_deg_group"] = np.where(subset_mask, "subset", "rest")
+            adata.obs["_deg_group"] = adata.obs["_deg_group"].astype("category")
+
+            # Verify we have cells in both groups
+            n_subset_actual = (adata.obs["_deg_group"] == "subset").sum()
+            n_rest_actual = (adata.obs["_deg_group"] == "rest").sum()
+
+            if n_subset_actual == 0:
+                return (
+                    dmc.Alert(f"No cells marked as subset (indices may be out of range). Expected {n_subset} cells.", color="red"),
+                    None, False, True, True
+                )
+
+            if n_rest_actual == 0:
+                return (
+                    dmc.Alert(f"No cells in 'rest' group - subset contains all {n_subset_actual} cells.", color="red"),
+                    None, False, True, True
+                )
 
             # Run rank_genes_groups
+            print(f"  ⚙️  Running scanpy.tl.rank_genes_groups (this may take a moment)...")
             sc.tl.rank_genes_groups(
                 adata,
                 groupby="_deg_group",
@@ -3347,8 +3409,10 @@ def register_callbacks(app: Dash):
                 use_raw=use_raw and adata.raw is not None,
                 n_genes=n_genes or 50,
             )
+            print(f"  ✅ rank_genes_groups completed!")
 
             # Extract results
+            print(f"  📋 Extracting results...")
             result = adata.uns["rank_genes_groups"]
             genes = result["names"]["subset"]
             scores = result["scores"]["subset"]
@@ -3364,9 +3428,9 @@ def register_callbacks(app: Dash):
                 gene_id = genes[i]
                 gene_symbol = gene_id
                 if gene_symbols_col and gene_id in adata.var.index:
-                    gene_symbol = adata.var.loc[gene_id, gene_symbols_col]
-                    if pd.isna(gene_symbol):
-                        gene_symbol = gene_id
+                    sym = adata.var.loc[gene_id, gene_symbols_col]
+                    if pd.notna(sym):
+                        gene_symbol = sym
 
                 results_data.append({
                     "rank": i + 1,
@@ -3378,26 +3442,31 @@ def register_callbacks(app: Dash):
                     "pval_adj": float(pvals_adj[i]),
                 })
 
-            # Build results table
-            table_rows = [
-                html.Tr([
-                    html.Th("Rank", style={"width": "50px"}),
-                    html.Th("Gene Symbol"),
-                    html.Th("Gene ID"),
-                    html.Th("Log2 FC", style={"textAlign": "right"}),
-                    html.Th("Score", style={"textAlign": "right"}),
-                    html.Th("P-value", style={"textAlign": "right"}),
-                    html.Th("Adj. P-value", style={"textAlign": "right"}),
-                ])
-            ]
+            if len(results_data) == 0:
+                return (
+                    dmc.Alert("DEG analysis completed but no genes found.", color="yellow"),
+                    None, False, True, True
+                )
 
+            # Build results table
+            header_row = html.Tr([
+                html.Th("Rank", style={"width": "50px"}),
+                html.Th("Gene Symbol"),
+                html.Th("Gene ID"),
+                html.Th("Log2 FC", style={"textAlign": "right"}),
+                html.Th("Score", style={"textAlign": "right"}),
+                html.Th("P-value", style={"textAlign": "right"}),
+                html.Th("Adj. P-value", style={"textAlign": "right"}),
+            ])
+
+            data_rows = []
             for row in results_data:
                 # Color log2fc based on direction
                 fc_color = "green" if row["log2fc"] > 0 else "red"
                 pval_display = f"{row['pval']:.2e}" if row["pval"] < 0.01 else f"{row['pval']:.4f}"
                 padj_display = f"{row['pval_adj']:.2e}" if row["pval_adj"] < 0.01 else f"{row['pval_adj']:.4f}"
 
-                table_rows.append(
+                data_rows.append(
                     html.Tr([
                         html.Td(str(row["rank"]), style={"color": "var(--mantine-color-dimmed)"}),
                         html.Td(dmc.Text(row["gene_symbol"], fw=500)),
@@ -3416,16 +3485,28 @@ def register_callbacks(app: Dash):
                 )
 
             table = dmc.Table(
-                children=[html.Tbody(table_rows)],
+                children=[
+                    html.Thead(header_row),
+                    html.Tbody(data_rows),
+                ],
                 striped=True,
                 highlightOnHover=True,
                 withTableBorder=True,
                 withColumnBorders=True,
             )
 
+            elapsed = time.time() - start_time
+            print(f"  🎉 Found {len(results_data)} differentially expressed genes")
+            print(f"  ⏱️  Total time: {elapsed:.2f} seconds")
+            print("=" * 60 + "\n")
+
             return table, results_data, False, False, False
 
         except Exception as e:
+            elapsed = time.time() - start_time
+            print(f"  ❌ ERROR: {str(e)}")
+            print(f"  ⏱️  Failed after: {elapsed:.2f} seconds")
+            print("=" * 60 + "\n")
             return (
                 dmc.Alert(f"Error running DEG analysis: {str(e)}", color="red"),
                 None, False, True, True
