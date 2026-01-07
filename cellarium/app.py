@@ -383,6 +383,7 @@ def create_layout(data_manager: DataManager, saved_pages: Optional[Dict] = None)
             create_export_modal(),
             create_rename_modal(),
             create_top_genes_modal(),
+            create_deg_modal(),
 
             # Config Drawer
             create_config_drawer(data_manager),
@@ -629,6 +630,16 @@ def create_toolbar(available_embeddings: List[str]):
             ]),
         ], position="bottom-start"),
 
+        # DEG Analysis button (only enabled for subset pages, controlled by callback)
+        dmc.Button(
+            "DEG Analysis",
+            id="deg-analysis-btn",
+            leftSection=DashIconify(icon="tabler:dna", width=16),
+            variant="light",
+            color="grape",
+            disabled=True,  # Enabled via callback when on subset page
+        ),
+
         dmc.Group([
             dmc.Button("Save Layout", id="save-layout-btn", leftSection=DashIconify(icon="tabler:device-floppy", width=16), variant="outline", size="sm"),
             dmc.Button("Load Layout", id="load-layout-btn", leftSection=DashIconify(icon="tabler:folder-open", width=16), variant="outline", size="sm"),
@@ -825,9 +836,10 @@ def create_config_drawer(data_manager: DataManager):
         ]),
         position="right",
         size="md",
-        withOverlay=False,
-        closeOnClickOutside=False,
+        withOverlay=False,  # Don't dim the page
+        closeOnClickOutside=False,  # Keep open when clicking outside
         children=[
+            # Main content in ScrollArea (leave room for sticky footer)
             dmc.ScrollArea(
                 h="calc(100vh - 160px)",
                 children=[
@@ -1118,7 +1130,6 @@ def create_config_drawer(data_manager: DataManager):
                                 ],
                             ),
                         ]),
-
                     ], gap="sm", p="md"),
                 ],
             ),
@@ -1137,7 +1148,6 @@ def create_config_drawer(data_manager: DataManager):
                     "backgroundColor": "var(--mantine-color-body)",
                 },
             ),
-
         ],
         opened=False,
     )
@@ -1317,6 +1327,107 @@ def create_top_genes_modal():
                 ], justify="flex-end"),
                 dcc.Download(id="top-genes-download"),
                 dcc.Store(id="top-genes-data-store", storage_type="memory", data=None),
+            ], gap="md"),
+        ],
+        opened=False,
+    )
+
+
+def create_deg_modal():
+    """Create differential expression analysis modal."""
+    return dmc.Modal(
+        id="deg-modal",
+        title=dmc.Group([DashIconify(icon="tabler:dna-2", width=20), dmc.Text("Differential Expression Analysis", fw=500)]),
+        size="xl",
+        children=[
+            dmc.Stack([
+                # Info section
+                dmc.Alert(
+                    id="deg-info-alert",
+                    title="DEG Analysis",
+                    color="grape",
+                    children="Comparing current subset cells vs all other cells using rank_genes_groups (Wilcoxon test).",
+                ),
+
+                # Parameters
+                dmc.Group([
+                    dmc.NumberInput(
+                        id="deg-n-genes",
+                        label="Top N Genes",
+                        description="Number of top genes to show",
+                        value=50,
+                        min=10,
+                        max=500,
+                        step=10,
+                        w=120,
+                    ),
+                    dmc.Select(
+                        id="deg-method",
+                        label="Test Method",
+                        description="Statistical test to use",
+                        data=[
+                            {"value": "wilcoxon", "label": "Wilcoxon rank-sum"},
+                            {"value": "t-test", "label": "t-test"},
+                            {"value": "t-test_overestim_var", "label": "t-test (overestimated var)"},
+                            {"value": "logreg", "label": "Logistic regression"},
+                        ],
+                        value="wilcoxon",
+                        w=200,
+                    ),
+                    dmc.Switch(
+                        id="deg-use-raw",
+                        label="Use raw counts",
+                        description="Recommended for DE",
+                        checked=True,
+                    ),
+                ], align="flex-end", gap="md"),
+
+                # Run button
+                dmc.Button(
+                    "Run Analysis",
+                    id="deg-run-btn",
+                    leftSection=DashIconify(icon="tabler:player-play", width=16),
+                    color="grape",
+                ),
+
+                # Results section with loading
+                dmc.Box(
+                    pos="relative",
+                    children=[
+                        dmc.LoadingOverlay(
+                            id="deg-loading",
+                            visible=False,
+                            overlayProps={"radius": "sm", "blur": 2},
+                        ),
+                        html.Div(
+                            id="deg-results-container",
+                            style={"maxHeight": "450px", "overflowY": "auto"},
+                            children=dmc.Text("Click 'Run Analysis' to compute differential expression.", c="dimmed", ta="center", py="xl"),
+                        ),
+                    ],
+                ),
+
+                # Action buttons
+                dmc.Group([
+                    dmc.Button(
+                        "Download CSV",
+                        id="deg-download-btn",
+                        leftSection=DashIconify(icon="tabler:download", width=16),
+                        variant="outline",
+                        disabled=True,
+                    ),
+                    dmc.Button(
+                        "Add Top Genes to Dotplot",
+                        id="deg-add-dotplot-btn",
+                        leftSection=DashIconify(icon="tabler:chart-dots", width=16),
+                        variant="light",
+                        disabled=True,
+                    ),
+                    dmc.Button("Close", id="deg-close-btn", variant="light", color="gray"),
+                ], justify="flex-end"),
+
+                dcc.Download(id="deg-download"),
+                dcc.Store(id="deg-results-store", storage_type="memory", data=None),
             ], gap="md"),
         ],
         opened=False,
@@ -3134,6 +3245,248 @@ def register_callbacks(app: Dash):
         csv_content = df.to_csv(index=False)
 
         return dict(content=csv_content, filename="top_genes.csv")
+
+    # -------------------------------------------------------------------------
+    # DEG Analysis
+    # -------------------------------------------------------------------------
+    @app.callback(
+        Output("deg-analysis-btn", "disabled"),
+        Input("pages-store", "data"),
+    )
+    def toggle_deg_button(pages_state):
+        """Enable DEG button only when on a subset page (not root)."""
+        if not pages_state:
+            return True
+        active_page_id = pages_state.get("active_page", "root")
+        return active_page_id == "root"
+
+    @app.callback(
+        Output("deg-modal", "opened"),
+        Output("deg-info-alert", "children"),
+        Input("deg-analysis-btn", "n_clicks"),
+        Input("deg-close-btn", "n_clicks"),
+        State("pages-store", "data"),
+        prevent_initial_call=True,
+    )
+    def toggle_deg_modal(open_click, close_click, pages_state):
+        """Open/close DEG modal."""
+        triggered = ctx.triggered_id
+
+        if triggered == "deg-close-btn":
+            return False, no_update
+
+        if triggered == "deg-analysis-btn":
+            active_page_id = pages_state.get("active_page", "root")
+            active_page = pages_state["pages"].get(active_page_id, {})
+            n_subset = active_page.get("n_cells", 0)
+            n_total = pages_state["pages"]["root"]["n_cells"]
+            n_rest = n_total - n_subset
+
+            info_text = (
+                f"Comparing {n_subset:,} cells in '{active_page.get('name', 'Subset')}' "
+                f"vs {n_rest:,} other cells using rank_genes_groups."
+            )
+            return True, info_text
+
+        raise PreventUpdate
+
+    @app.callback(
+        Output("deg-results-container", "children"),
+        Output("deg-results-store", "data"),
+        Output("deg-loading", "visible"),
+        Output("deg-download-btn", "disabled"),
+        Output("deg-add-dotplot-btn", "disabled"),
+        Input("deg-run-btn", "n_clicks"),
+        State("pages-store", "data"),
+        State("deg-n-genes", "value"),
+        State("deg-method", "value"),
+        State("deg-use-raw", "checked"),
+        prevent_initial_call=True,
+    )
+    def run_deg_analysis(n_clicks, pages_state, n_genes, method, use_raw):
+        """Run differential expression analysis using rank_genes_groups."""
+        if not n_clicks:
+            raise PreventUpdate
+
+        import scanpy as sc
+
+        dm: DataManager = app.server.config["data_manager"]
+        active_page_id = pages_state.get("active_page", "root")
+        active_page = pages_state["pages"].get(active_page_id, {})
+        subset_indices = active_page.get("cell_indices", [])
+
+        if not subset_indices:
+            return (
+                dmc.Alert("No cell indices found for this subset.", color="red"),
+                None, False, True, True
+            )
+
+        try:
+            # Create a copy of AnnData for analysis
+            adata = dm.adata.copy()
+
+            # Add a group column: "subset" for current cells, "rest" for others
+            adata.obs["_deg_group"] = "rest"
+            adata.obs.iloc[subset_indices, adata.obs.columns.get_loc("_deg_group")] = "subset"
+
+            # Use raw data if requested and available
+            if use_raw and adata.raw is not None:
+                # rank_genes_groups will use raw automatically if set
+                pass
+            elif use_raw and adata.raw is None:
+                # No raw, continue with main matrix
+                pass
+
+            # Run rank_genes_groups
+            sc.tl.rank_genes_groups(
+                adata,
+                groupby="_deg_group",
+                groups=["subset"],
+                reference="rest",
+                method=method or "wilcoxon",
+                use_raw=use_raw and adata.raw is not None,
+                n_genes=n_genes or 50,
+            )
+
+            # Extract results
+            result = adata.uns["rank_genes_groups"]
+            genes = result["names"]["subset"]
+            scores = result["scores"]["subset"]
+            pvals = result["pvals"]["subset"]
+            pvals_adj = result["pvals_adj"]["subset"]
+            logfoldchanges = result["logfoldchanges"]["subset"]
+
+            # Get gene symbols if available
+            gene_symbols_col = dm.detect_gene_symbols_column()
+
+            results_data = []
+            for i in range(len(genes)):
+                gene_id = genes[i]
+                gene_symbol = gene_id
+                if gene_symbols_col and gene_id in adata.var.index:
+                    gene_symbol = adata.var.loc[gene_id, gene_symbols_col]
+                    if pd.isna(gene_symbol):
+                        gene_symbol = gene_id
+
+                results_data.append({
+                    "rank": i + 1,
+                    "gene_id": gene_id,
+                    "gene_symbol": gene_symbol,
+                    "score": float(scores[i]),
+                    "log2fc": float(logfoldchanges[i]),
+                    "pval": float(pvals[i]),
+                    "pval_adj": float(pvals_adj[i]),
+                })
+
+            # Build results table
+            table_rows = [
+                html.Tr([
+                    html.Th("Rank", style={"width": "50px"}),
+                    html.Th("Gene Symbol"),
+                    html.Th("Gene ID"),
+                    html.Th("Log2 FC", style={"textAlign": "right"}),
+                    html.Th("Score", style={"textAlign": "right"}),
+                    html.Th("P-value", style={"textAlign": "right"}),
+                    html.Th("Adj. P-value", style={"textAlign": "right"}),
+                ])
+            ]
+
+            for row in results_data:
+                # Color log2fc based on direction
+                fc_color = "green" if row["log2fc"] > 0 else "red"
+                pval_display = f"{row['pval']:.2e}" if row["pval"] < 0.01 else f"{row['pval']:.4f}"
+                padj_display = f"{row['pval_adj']:.2e}" if row["pval_adj"] < 0.01 else f"{row['pval_adj']:.4f}"
+
+                table_rows.append(
+                    html.Tr([
+                        html.Td(str(row["rank"]), style={"color": "var(--mantine-color-dimmed)"}),
+                        html.Td(dmc.Text(row["gene_symbol"], fw=500)),
+                        html.Td(dmc.Text(row["gene_id"], size="sm", c="dimmed")),
+                        html.Td(
+                            dmc.Text(f"{row['log2fc']:.3f}", c=fc_color, fw=500),
+                            style={"textAlign": "right"}
+                        ),
+                        html.Td(f"{row['score']:.2f}", style={"textAlign": "right"}),
+                        html.Td(pval_display, style={"textAlign": "right"}),
+                        html.Td(
+                            dmc.Badge(padj_display, color="green" if row["pval_adj"] < 0.05 else "gray", size="sm"),
+                            style={"textAlign": "right"}
+                        ),
+                    ])
+                )
+
+            table = dmc.Table(
+                children=[html.Tbody(table_rows)],
+                striped=True,
+                highlightOnHover=True,
+                withTableBorder=True,
+                withColumnBorders=True,
+            )
+
+            return table, results_data, False, False, False
+
+        except Exception as e:
+            return (
+                dmc.Alert(f"Error running DEG analysis: {str(e)}", color="red"),
+                None, False, True, True
+            )
+
+    @app.callback(
+        Output("deg-download", "data"),
+        Input("deg-download-btn", "n_clicks"),
+        State("deg-results-store", "data"),
+        prevent_initial_call=True,
+    )
+    def download_deg_results(n_clicks, data):
+        """Download DEG results as CSV."""
+        if not n_clicks or not data:
+            raise PreventUpdate
+
+        df = pd.DataFrame(data)
+        csv_content = df.to_csv(index=False)
+        return dict(content=csv_content, filename="deg_results.csv")
+
+    @app.callback(
+        Output("pages-store", "data", allow_duplicate=True),
+        Output("dashboard-wrapper", "children", allow_duplicate=True),
+        Input("deg-add-dotplot-btn", "n_clicks"),
+        State("deg-results-store", "data"),
+        State("pages-store", "data"),
+        prevent_initial_call=True,
+    )
+    def add_deg_genes_to_dotplot(n_clicks, deg_data, pages_state):
+        """Add a dotplot panel with top DEG genes."""
+        if not n_clicks or not deg_data:
+            raise PreventUpdate
+
+        dm: DataManager = app.server.config["data_manager"]
+
+        # Get top 20 gene symbols from DEG results
+        top_genes = [row["gene_symbol"] for row in deg_data[:20]]
+
+        # Create a new dotplot panel
+        active_page_id = pages_state.get("active_page", "root")
+        active_page = pages_state["pages"][active_page_id]
+
+        panel_id = f"panel-{uuid.uuid4().hex[:8]}"
+        new_panel = {
+            "type": "dotplot",
+            "config": {
+                "var_names": top_genes,
+                "groupby": dm.get_categorical_columns()[0] if dm.get_categorical_columns() else None,
+                "colorscale": "Reds",
+            },
+            "width": DEFAULT_PANEL_WIDTH,
+            "height": DEFAULT_PANEL_HEIGHT,
+        }
+
+        active_page["panels"][panel_id] = new_panel
+        pages_state["pages"][active_page_id] = active_page
+
+        # Regenerate dashboard
+        dashboard = create_dashboard_grid(active_page["panels"], active_page.get("grid_layout"))
+
+        return pages_state, dashboard
 
     # -------------------------------------------------------------------------
     # Keyboard Shortcuts
